@@ -1,0 +1,154 @@
+# =============================================================================
+# Tokio Bar Restaurant Bot — production-ready Docker Compose stack
+# =============================================================================
+# Services:
+#   - db    : PostgreSQL 16 with health check + persistent volume
+#   - bot   : Telegram bot (guest + staff) built from the Dockerfile
+#
+# Usage:
+#   1. Copy .env.example → .env and fill in real values.
+#   2. docker compose up -d --build
+#   3. docker compose logs -f bot
+#
+# The bot waits for the database to be healthy (depends_on: condition: service_healthy)
+# then runs init_db.py (idempotent) and starts polling.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: tokio_bar_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-tokio_bar}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required in .env}
+      # Tuning for a small-to-medium workload on a single host.
+      # Tune these values + DB_POOL_MAX_SIZE to match your hardware.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready is the canonical Postgres readiness check.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-tokio_bar}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Resource limits protect the host from runaway memory/CPU usage.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          memory: 256M
+    # Keep the DB on a dedicated network with the bot.
+    networks:
+      - tokio_net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Bot application (guest + staff bots in one container)
+  # ---------------------------------------------------------------------------
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tokio-bar-bot:latest
+    container_name: tokio_bar_bot
+    restart: unless-stopped
+    # The bot only starts after the DB is healthy (not just "started").
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # ---- Bot tokens (REQUIRED) --------------------------------------------
+      GUEST_BOT_TOKEN: ${GUEST_BOT_TOKEN:?GUEST_BOT_TOKEN is required in .env}
+      STAFF_BOT_TOKEN: ${STAFF_BOT_TOKEN:?STAFF_BOT_TOKEN is required in .env}
+
+      # ---- Database → points to the `db` service ----------------------------
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-tokio_bar}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required in .env}
+
+      # ---- Connection pool tuning (high-load resilience) -------------------
+      # Increase these if you experience "too many connections" or timeouts.
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-2}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-15}
+      DB_COMMAND_TIMEOUT: ${DB_COMMAND_TIMEOUT:-60}
+
+      # ---- Application settings --------------------------------------------
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TIMEZONE: ${TIMEZONE:-Europe/Moscow}
+      TOTAL_TABLES: ${TOTAL_TABLES:-7}
+
+      # ---- Logging → write to the mounted volume --------------------------
+      LOG_DIR: /app/logs
+
+      # ---- Optional proxy (uncomment in .env if Telegram is blocked) -------
+      PROXY_URL: ${PROXY_URL:-}
+
+      # ---- Entrypoint behaviour --------------------------------------------
+      # How long to wait for the DB on startup (seconds).
+      DB_WAIT_TIMEOUT: "60"
+      DB_WAIT_INTERVAL: "2"
+      # Set to 1 to skip running init_db.py on every container start.
+      SKIP_DB_INIT: ${SKIP_DB_INIT:-0}
+    volumes:
+      # Persist logs and generated QR codes outside the container.
+      - bot_logs:/app/logs
+      - bot_qr_codes:/app/qr_codes
+    # Allow the container to reach the host machine via "host.docker.internal".
+    # This is needed when PROXY_URL points to a VPN/proxy running on the host.
+    # (Works out-of-the-box on Docker Desktop; this line enables it on Linux too.)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 512M
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - tokio_net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# =============================================================================
+# Named volumes — persistent data survives container recreation.
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  bot_logs:
+    driver: local
+  bot_qr_codes:
+    driver: local
+
+# =============================================================================
+# Internal-only network — the DB is NOT exposed to the host by default.
+# (Remove the comment on `ports` under `db` if you need external access.)
+# =============================================================================
+networks:
+  tokio_net:
+    driver: bridge

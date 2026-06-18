@@ -1,0 +1,77 @@
+# =============================================================================
+# .dockerignore — files excluded from the Docker build context
+# =============================================================================
+# Keeping the build context small → faster builds, smaller cache, better security
+# (secrets in .env are never sent to the Docker daemon).
+# =============================================================================
+
+# ---- Environment / secrets -------------------------------------------------
+.env
+*.env
+.env.*
+!.env.example
+
+# ---- Python caches & artifacts ---------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+wheels/
+*.whl
+
+# ---- Virtual environments --------------------------------------------------
+venv/
+env/
+ENV/
+.venv/
+
+# ---- Testing & coverage ----------------------------------------------------
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+htmlcov/
+tests/
+
+# ---- IDEs & editors --------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- Logs & temporary files ------------------------------------------------
+*.log
+bot.log
+*.tmp
+*.bak
+
+# ---- OS files --------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Project artifacts -----------------------------------------------------
+qr_codes/*.png
+*.sql.bak
+
+# ---- Docker ----------------------------------------------------------------
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# ---- Version control -------------------------------------------------------
+.git/
+.gitignore
+.github/
+.gitlab-ci.yml
