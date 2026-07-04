@@ -7,6 +7,7 @@ from aiogram.types import TelegramObject
 from services import (
     AuthService,
     CartService,
+    GuestSessionService,
     MenuService,
     OrderService,
     TableService,
@@ -27,6 +28,7 @@ class ServiceMiddleware(BaseMiddleware):
         cart_service: CartService,
         order_service: OrderService,
         table_service: TableService,
+        guest_session_service: GuestSessionService,
     ):
         self._services = {
             "auth_service": auth_service,
@@ -34,6 +36,7 @@ class ServiceMiddleware(BaseMiddleware):
             "cart_service": cart_service,
             "order_service": order_service,
             "table_service": table_service,
+            "guest_session_service": guest_session_service,
         }
 
     async def __call__(
