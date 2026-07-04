@@ -163,71 +163,80 @@ class CartRepository:
                 for row in rows
             ]
 
-    async def get_cart_total(self, cart_id: int) -> float:
+    async def get_cart_total(self, cart_id: int, conn=None) -> float:
         """Get the total price of all items in the cart.
-        
+
         Args:
             cart_id: The cart ID.
-            
+            conn: Optional existing connection (for transactions).
+
         Returns:
             Total price as float.
         """
+        sql = """
+            SELECT COALESCE(SUM(quantity * price), 0) as total
+            FROM cart_items
+            WHERE cart_id = $1
+        """
+        if conn is not None:
+            row = await conn.fetchrow(sql, cart_id)
+            return float(row["total"]) if row else 0.0
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT COALESCE(SUM(quantity * price), 0) as total
-                FROM cart_items
-                WHERE cart_id = $1
-                """,
-                cart_id,
-            )
+            row = await conn.fetchrow(sql, cart_id)
             return float(row["total"]) if row else 0.0
 
-    async def clear_cart(self, table_number: int) -> None:
+    async def clear_cart(self, table_number: int, conn=None) -> None:
         """Clear all items from a table's cart.
-        
+
         Args:
             table_number: The restaurant table number.
+            conn: Optional existing connection (for transactions).
         """
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                DELETE FROM cart_items WHERE cart_id = (
-                    SELECT id FROM carts WHERE table_number = $1
-                )
-                """,
-                table_number,
+        sql = """
+            DELETE FROM cart_items WHERE cart_id = (
+                SELECT id FROM carts WHERE table_number = $1
             )
+        """
+        if conn is not None:
+            await conn.execute(sql, table_number)
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(sql, table_number)
 
-    async def delete_cart(self, table_number: int) -> None:
+    async def delete_cart(self, table_number: int, conn=None) -> None:
         """Delete the cart for a table completely.
-        
-        Args:
-            table_number: The restaurant table number.
-        """
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM carts WHERE table_number = $1", table_number
-            )
 
-    async def get_cart_by_table(self, table_number: int) -> Optional[Cart]:
-        """Get cart for a table without creating if not exists.
-        
         Args:
             table_number: The restaurant table number.
-            
+            conn: Optional existing connection (for transactions).
+        """
+        sql = "DELETE FROM carts WHERE table_number = $1"
+        if conn is not None:
+            await conn.execute(sql, table_number)
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(sql, table_number)
+
+    async def get_cart_by_table(self, table_number: int, conn=None) -> Optional[Cart]:
+        """Get cart for a table without creating if not exists.
+
+        Args:
+            table_number: The restaurant table number.
+            conn: Optional existing connection (for transactions).
+
         Returns:
             Cart instance if exists, None otherwise.
         """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, table_number, created_at FROM carts WHERE table_number = $1",
-                table_number,
-            )
-            if row is None:
-                return None
-            return Cart(
-                id=row["id"],
-                table_number=row["table_number"],
-                created_at=row["created_at"].isoformat() if row["created_at"] else None,
-            )
+        sql = "SELECT id, table_number, created_at FROM carts WHERE table_number = $1"
+        if conn is not None:
+            row = await conn.fetchrow(sql, table_number)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(sql, table_number)
+        if row is None:
+            return None
+        return Cart(
+            id=row["id"],
+            table_number=row["table_number"],
+            created_at=row["created_at"].isoformat() if row["created_at"] else None,
+        )
