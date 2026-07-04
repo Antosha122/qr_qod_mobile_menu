@@ -2,7 +2,7 @@
 import logging
 from typing import Optional
 
-from database.repositories import MenuRepository
+from database.repositories import MenuRepositoryProtocol
 from database.models import Category, MenuItem
 
 logger = logging.getLogger(__name__)
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class MenuService:
     """Handles menu-related business logic."""
 
-    def __init__(self, menu_repo: MenuRepository):
+    def __init__(self, menu_repo: MenuRepositoryProtocol):
         self._menu_repo = menu_repo
 
     async def get_all_categories(self) -> list[Category]:
