@@ -40,6 +40,7 @@ class ClosedBillRepository:
         waiter_id: Optional[int],
         table_number: int,
         amount: float,
+        conn=None,
     ) -> ClosedBill:
         """Record a closed bill (a finalized table payment).
 
@@ -51,20 +52,21 @@ class ClosedBillRepository:
         Returns:
             The created ClosedBill instance.
         """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                INSERT INTO closed_bills (waiter_id, table_number, amount)
-                VALUES ($1, $2, $3)
-                RETURNING {_SELECT_COLUMNS}
-                """,
-                waiter_id, table_number, amount,
-            )
-            logger.info(
-                f"Recorded closed bill: table {table_number}, "
-                f"waiter {waiter_id}, amount {amount}."
-            )
-            return _row_to_bill(row)
+        sql = f"""
+            INSERT INTO closed_bills (waiter_id, table_number, amount)
+            VALUES ($1, $2, $3)
+            RETURNING {_SELECT_COLUMNS}
+        """
+        if conn is not None:
+            row = await conn.fetchrow(sql, waiter_id, table_number, amount)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(sql, waiter_id, table_number, amount)
+        logger.info(
+            f"Recorded closed bill: table {table_number}, "
+            f"waiter {waiter_id}, amount {amount}."
+        )
+        return _row_to_bill(row)
 
     async def get_revenue_since(self, since: datetime) -> tuple[float, int]:
         """Get total revenue and bill count since a given timestamp.
