@@ -3,11 +3,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from database.repositories import (
-    WaiterAssignmentRepository,
-    CartRepository,
-    UserRepository,
-    ClosedBillRepository,
+from database.repositories.protocols import (
+    WaiterAssignmentRepositoryProtocol,
+    CartRepositoryProtocol,
+    UserRepositoryProtocol,
+    ClosedBillRepositoryProtocol,
 )
 from database.models import WaiterAssignment
 
@@ -25,6 +25,7 @@ PERIOD_DELTAS: dict[str, timedelta] = {
 
 class PaymentConfirmationError(Exception):
     """Raised when a non-assigned waiter tries to confirm payment."""
+
     def __init__(self, table_number: int, confirmer_id: Optional[int]):
         self.table_number = table_number
         self.confirmer_id = confirmer_id
@@ -53,10 +54,10 @@ class TableService:
 
     def __init__(
         self,
-        assignment_repo: WaiterAssignmentRepository,
-        cart_repo: CartRepository,
-        user_repo: Optional[UserRepository] = None,
-        closed_bill_repo: Optional[ClosedBillRepository] = None,
+        assignment_repo: WaiterAssignmentRepositoryProtocol,
+        cart_repo: CartRepositoryProtocol,
+        user_repo: Optional[UserRepositoryProtocol] = None,
+        closed_bill_repo: Optional[ClosedBillRepositoryProtocol] = None,
     ):
         self._assignment_repo = assignment_repo
         self._cart_repo = cart_repo
@@ -68,11 +69,11 @@ class TableService:
 
     async def assign_waiter(self, waiter_id: int, table_number: int) -> WaiterAssignment:
         """Assign a waiter to a table.
-        
+
         Args:
             waiter_id: The waiter's user ID.
             table_number: The table number.
-            
+
         Returns:
             The created/updated WaiterAssignment instance.
         """
@@ -82,18 +83,18 @@ class TableService:
 
     async def auto_assign_waiter(self, table_number: int) -> Optional[WaiterAssignment]:
         """Automatically assign a table to the least busy (or free) waiter.
-        
+
         Selection rule (matches the requested business logic):
         1. Prefer waiters with zero open tables (free waiters).
         2. Otherwise assign to the waiter with the fewest open tables.
         3. Ties are broken by waiter id (oldest waiter first) for determinism.
-        
+
         If the table already has an open assignment, it is returned as-is.
         If no waiters exist, returns None.
-        
+
         Args:
             table_number: The table number to assign.
-            
+
         Returns:
             The WaiterAssignment instance, or None if no waiters are available.
         """
@@ -135,10 +136,10 @@ class TableService:
 
     async def get_assignment(self, table_number: int) -> Optional[WaiterAssignment]:
         """Get the assignment for a table.
-        
+
         Args:
             table_number: The table number.
-            
+
         Returns:
             WaiterAssignment instance if found, None otherwise.
         """
@@ -146,10 +147,10 @@ class TableService:
 
     async def get_open_assignment(self, table_number: int) -> Optional[WaiterAssignment]:
         """Get the open assignment for a table.
-        
+
         Args:
             table_number: The table number.
-            
+
         Returns:
             WaiterAssignment instance if open assignment exists, None otherwise.
         """
@@ -157,10 +158,10 @@ class TableService:
 
     async def is_table_open(self, table_number: int) -> bool:
         """Check if a table has an open assignment.
-        
+
         Args:
             table_number: The table number.
-            
+
         Returns:
             True if the table has an open assignment, False otherwise.
         """
@@ -168,10 +169,10 @@ class TableService:
 
     async def request_bill(self, table_number: int) -> bool:
         """Mark that the guest has requested the bill for a table.
-        
+
         Args:
             table_number: The table number.
-            
+
         Returns:
             True if the assignment was found and updated, False otherwise.
         """
@@ -268,43 +269,44 @@ class TableService:
         Returns:
             True if assignment was found and closed, False otherwise.
         """
-        assignment = await self._assignment_repo.get_open_assignment(table_number)
+        # Use the repository's public acquire_connection() instead of reaching
+        # into its private _pool. The connection is shared by all repositories
+        # involved in this transaction via their conn= parameter.
+        async with self._assignment_repo.acquire_connection() as conn:
+            tx_result = False
+            async with conn.transaction():
+                assignment = await self._assignment_repo.get_open_assignment(table_number)
 
-        # Closing a table means the guest has paid. If the payment hadn't been
-        # confirmed explicitly yet, mark it as paid automatically — the waiter
-        # pressing "Close table" is itself the confirmation of payment.
-        if assignment is not None and assignment.payment_status != "paid":
-            await self._assignment_repo.update_payment_status(table_number, "paid")
-            logger.info(
-                f"Payment for table {table_number} auto-confirmed on close "
-                f"(previous status='{assignment.payment_status}')."
-            )
-
-        # Capture the bill amount (cart total) and the serving waiter BEFORE the
-        # cart is cleared, so revenue and per-waiter statistics can be tracked.
-        cart = await self._cart_repo.get_cart_by_table(table_number)
-        bill_amount = (
-            await self._cart_repo.get_cart_total(cart.id) if cart else 0.0
-        )
-        waiter_id = assignment.waiter_id if assignment else None
-
-        result = await self._assignment_repo.close_table(table_number)
-        if result:
-            # Record the closed bill first, while we still have the amount.
-            if self._closed_bill_repo is not None:
-                try:
-                    await self._closed_bill_repo.record_bill(
-                        waiter_id, table_number, bill_amount
+                if assignment is not None and assignment.payment_status != "paid":
+                    await self._assignment_repo.update_payment_status(
+                        table_number, "paid", conn=conn
                     )
-                except Exception:
-                    # Revenue tracking must never block closing a table.
-                    logger.exception(
-                        f"Failed to record closed bill for table {table_number}."
+                    logger.info(
+                        f"Payment for table {table_number} auto-confirmed on close "
+                        f"(previous status='{assignment.payment_status}')."
                     )
-            await self._cart_repo.clear_cart(table_number)
-            await self._cart_repo.delete_cart(table_number)
-            logger.info(f"Table {table_number} closed and cart cleared.")
-        return result
+
+                cart = await self._cart_repo.get_cart_by_table(table_number, conn=conn)
+                bill_amount = (
+                    await self._cart_repo.get_cart_total(cart.id, conn=conn) if cart else 0.0
+                )
+                waiter_id = assignment.waiter_id if assignment else None
+
+                tx_result = await self._assignment_repo.close_table(table_number, conn=conn)
+                if tx_result:
+                    if self._closed_bill_repo is not None:
+                        try:
+                            await self._closed_bill_repo.record_bill(
+                                waiter_id, table_number, bill_amount, conn=conn
+                            )
+                        except Exception:
+                            logger.exception(
+                                f"Failed to record closed bill for table {table_number}."
+                            )
+                    await self._cart_repo.clear_cart(table_number, conn=conn)
+                    await self._cart_repo.delete_cart(table_number, conn=conn)
+                    logger.info(f"Table {table_number} closed and cart cleared.")
+            return tx_result
 
     async def unassign_table(self, table_number: int) -> bool:
         """Release a table from its waiter (admin action).
@@ -377,7 +379,7 @@ class TableService:
 
     async def get_all_open_tables(self) -> list[WaiterAssignment]:
         """Get all open table assignments.
-        
+
         Returns:
             List of open WaiterAssignment instances.
         """
@@ -385,11 +387,91 @@ class TableService:
 
     async def get_waiter_open_tables(self, waiter_id: int) -> list[WaiterAssignment]:
         """Get all open table assignments for a specific waiter.
-        
+
         Args:
             waiter_id: The waiter's user ID.
-            
+
         Returns:
             List of open WaiterAssignment instances assigned to the waiter.
         """
         return await self._assignment_repo.get_open_by_waiter(waiter_id)
+
+    async def get_table_overview(
+        self,
+        waiter_id: Optional[int] = None,
+        *,
+        is_admin: bool = False,
+        total_tables: Optional[int] = None,
+    ) -> dict[int, dict]:
+        """Build an overview of all tables for the staff "Tables" view.
+
+        This is pure business logic (which table is open/closed, who owns it,
+        its cart total and payment status) extracted from the handler. The
+        handler used to assemble this dict itself, reaching into the
+        assignment/cart repositories directly.
+
+        Args:
+            waiter_id: The current staff user's id. Non-admins only "own" the
+                tables assigned to them, which is reflected via ``is_mine``.
+            is_admin: When True, every open table is considered "mine" and is
+                fully visible (admins manage all tables).
+            total_tables: Total number of tables in the restaurant. When
+                ``None``, only tables that currently have an assignment are
+                included (no empty slots). When provided, every table number
+                from 1..total_tables is present in the result.
+
+        Returns:
+            A mapping ``{table_number: info_dict}`` where each ``info_dict``
+            has the keys:
+
+            * ``is_open`` (bool)
+            * ``is_mine`` (bool) — True if the table is visible to the user
+              (assigned to them, or any table for admins).
+            * ``waiter_id`` (int | None)
+            * ``payment_status`` (str)
+            * ``total`` (float) — cart total for the table (0.0 if no cart).
+        """
+        # Open assignments the caller is allowed to see:
+        #   * admins (and callers without a waiter_id) see ALL open tables;
+        #   * a specific waiter only sees the tables assigned to them.
+        if is_admin or waiter_id is None:
+            visible = await self._assignment_repo.get_all_open()
+        else:
+            visible = await self._assignment_repo.get_open_by_waiter(waiter_id)
+
+        visible_by_table: dict[int, WaiterAssignment] = {
+            a.table_number: a for a in visible
+        }
+
+        # Determine the full set of table numbers to report. When total_tables
+        # is provided, every table slot 1..N is included so the keyboard shows
+        # empty tables too; otherwise only tables with assignments appear.
+        table_numbers: set[int] = set(visible_by_table.keys())
+        if total_tables is not None:
+            table_numbers.update(range(1, total_tables + 1))
+
+        overview: dict[int, dict] = {}
+        for table_number in sorted(table_numbers):
+            assignment = visible_by_table.get(table_number)
+
+            is_open = assignment is not None and assignment.status == "open"
+            if is_open and assignment is not None:
+                is_mine = is_admin or assignment.waiter_id == waiter_id
+            else:
+                is_mine = False
+
+            # Cart total — only fetch for tables the user actually "owns" so we
+            # don't issue a DB query per foreign table.
+            total = 0.0
+            if is_mine:
+                total = await self._cart_repo.get_cart_total(table_number)
+
+            overview[table_number] = {
+                "is_open": is_open,
+                "is_mine": is_mine,
+                "waiter_id": assignment.waiter_id if assignment else None,
+                "payment_status": assignment.payment_status if assignment else "unpaid",
+                "total": total,
+            }
+
+        return overview
