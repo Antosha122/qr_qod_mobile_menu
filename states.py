@@ -7,15 +7,16 @@ class StaffStates(StatesGroup):
     
     # Authentication
     waiting_for_login = State()
+    waiting_for_new_password = State()
     
     # Waiter management (admin)
     waiting_for_waiter_credentials = State()
-    selecting_waiter = State()           # admin: chose a waiter from the list
-    confirming_waiter_delete = State()   # admin: confirm deleting a waiter
+    selecting_waiter = State()
+    confirming_waiter_delete = State()
 
     # Table management
     waiting_for_waiter_name = State()
-    unassigning_table = State()          # admin: choose a table to unassign
+    unassigning_table = State()
     
     # Order management
     selecting_table = State()
