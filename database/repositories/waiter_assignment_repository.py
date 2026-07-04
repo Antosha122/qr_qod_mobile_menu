@@ -1,6 +1,7 @@
 """Repository for waiter assignment database operations."""
+import contextlib
 import logging
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import asyncpg
 
@@ -32,6 +33,18 @@ class WaiterAssignmentRepository:
 
     def __init__(self, pool: asyncpg.Pool):
         self._pool = pool
+
+    @contextlib.asynccontextmanager
+    async def acquire_connection(self) -> AsyncIterator[asyncpg.Connection]:
+        """Acquire a raw connection from the underlying pool.
+
+        Yields a connection that callers can pass to other repositories via
+        the ``conn=`` parameter to run several operations inside a single
+        transaction. Services should use this method instead of reaching into
+        the repository's private ``_pool`` attribute.
+        """
+        async with self._pool.acquire() as conn:
+            yield conn
 
     async def assign_waiter(self, waiter_id: int, table_number: int) -> WaiterAssignment:
         """Assign a waiter to a table (or reopen/reset an existing one).
@@ -105,7 +118,7 @@ class WaiterAssignmentRepository:
             )
             return _row_to_assignment(row) if row else None
 
-    async def close_table(self, table_number: int) -> bool:
+    async def close_table(self, table_number: int, conn=None) -> bool:
         """Close a table assignment and reset its payment status.
 
         Closing a table releases it for the next guests: the status becomes
@@ -115,10 +128,19 @@ class WaiterAssignmentRepository:
 
         Args:
             table_number: The table number.
+            conn: Optional existing connection (for transactions).
 
         Returns:
             True if assignment was found and closed, False otherwise.
         """
+        if conn is not None:
+            result = await conn.execute(
+                "UPDATE waiter_assignments "
+                "SET status = 'closed', payment_status = 'unpaid' "
+                "WHERE table_number = $1",
+                table_number,
+            )
+            return result != "UPDATE 0"
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE waiter_assignments "
@@ -129,22 +151,24 @@ class WaiterAssignmentRepository:
             return result != "UPDATE 0"
 
     async def update_payment_status(
-        self, table_number: int, payment_status: str
+        self, table_number: int, payment_status: str, conn=None
     ) -> bool:
         """Update the payment status of a table assignment.
 
         Args:
             table_number: The table number.
             payment_status: The new payment status (e.g. 'unpaid', 'requested', 'paid').
+            conn: Optional existing connection (for transactions).
 
         Returns:
             True if assignment was found and updated, False otherwise.
         """
+        sql = "UPDATE waiter_assignments SET payment_status = $1 WHERE table_number = $2"
+        if conn is not None:
+            result = await conn.execute(sql, payment_status, table_number)
+            return result != "UPDATE 0"
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "UPDATE waiter_assignments SET payment_status = $1 WHERE table_number = $2",
-                payment_status, table_number,
-            )
+            result = await conn.execute(sql, payment_status, table_number)
             return result != "UPDATE 0"
 
     async def is_table_open(self, table_number: int) -> bool:
