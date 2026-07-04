@@ -22,7 +22,7 @@ from keyboards.guest_keyboards import (
     get_empty_cart_keyboard,
     get_payment_keyboard,
 )
-from services import CartService, MenuService, OrderService, TableService
+from services import CartService, GuestSessionService, MenuService, OrderService, TableService
 from utils.formatters import format_cart_message
 
 logger = logging.getLogger(__name__)
@@ -67,88 +67,37 @@ async def _invalidate_session(state: FSMContext, respond) -> None:
 
 async def _require_active_table(
     state: FSMContext,
-    table_service: TableService,
+    guest_session_service: "GuestSessionService",
     respond,
     *,
     for_payment: bool = False,
 ) -> Optional[int]:
-    """Validate the guest's table session and return the table number or None.
+    """Validate the guest's table session via GuestSessionService.
 
-    A guest starts a table session by scanning the QR code (``/start
-    table_N``). The session is bound to the table's *open* assignment at
-    that moment via the assignment's ``assigned_at`` timestamp (the
-    "session token"), stored in FSM state as ``session_assigned_at``.
-
-    If staff later closes the table, its assignment becomes ``'closed'`` and
-    the guest's session is no longer valid: every subsequent action is
-    rejected and the guest is asked to scan the QR code again. This prevents
-    a guest from ordering at a table that has already been closed (e.g. after
-    they have left the restaurant).
-
-    Rules:
-      * No ``table_number`` in state at all -> ask to scan the QR code.
-      * Fresh session (token is ``None``, the guest hasn't checked out / paid
-        yet): browsing is allowed. If the table happens to already be open,
-        the token is latched onto it. If ``for_payment`` is True and the
-        table is not open yet, a waiter is auto-assigned and the token is
-        captured.
-      * Active session (token is set): the table must currently be open under
-        the *same* assignment (matching ``assigned_at``). Otherwise the
-        session is invalidated.
-
-    Args:
-        state: FSM state holding ``table_number`` and ``session_assigned_at``.
-        table_service: The TableService instance.
-        respond: An awaitable callable that sends a message to the user
-            (e.g. ``message.answer`` or
-            ``lambda t: callback.answer(t, show_alert=True)``).
-        for_payment: When True, a fresh (never-opened) table is auto-assigned
-            a waiter so the payment flow has an assignment to update.
-
-    Returns:
-        The table number if the session is valid, otherwise ``None``.
+    Thin adapter that reads FSM state, delegates the business logic to
+    :class:`GuestSessionService`, and applies the resulting action (persisting
+    the session token, invalidating on rescan, or surfacing an error message)
+    back onto the aiogram layer.
     """
     data = await state.get_data()
     table_number = data.get("table_number")
     token = data.get("session_assigned_at")
 
-    if table_number is None:
-        await respond("Сначала отсканируйте QR-код стола.")
+    result = await guest_session_service.validate_table_session(
+        table_number, token, for_payment=for_payment
+    )
+
+    if result.error_message is not None:
+        await respond(result.error_message)
+
+    if result.requires_rescan:
+        await state.update_data(table_number=None, session_assigned_at=None)
         return None
 
-    open_assignment = await table_service.get_open_assignment(table_number)
+    if result.session_assigned_at is not None:
+        await state.update_data(session_assigned_at=result.session_assigned_at)
 
-    if token is None:
-        # Fresh session: the guest just scanned and hasn't opened the table
-        # themselves yet (no checkout/payment performed).
-        if open_assignment is not None:
-            # Latch onto an already-open table (e.g. a rescan of an active
-            # table) so subsequent close/reopen detection works correctly.
-            await state.update_data(
-                session_assigned_at=open_assignment.assigned_at
-            )
-        elif for_payment:
-            # Payment needs an open assignment; auto-assign for the fresh
-            # guest and capture the token. This does NOT reopen a table that
-            # was closed under an existing session (those guests have a token
-            # and take the branch below).
-            assignment = await table_service.auto_assign_waiter(table_number)
-            if assignment is None:
-                await respond(
-                    "Сейчас нет доступных официантов. Обратитесь к персоналу."
-                )
-                return None
-            await state.update_data(
-                session_assigned_at=assignment.assigned_at
-            )
-        return table_number
-
-    # Existing session: the table must still be open under the SAME assignment.
-    if open_assignment is None or open_assignment.assigned_at != token:
-        await _invalidate_session(state, respond)
-        return None
-
-    return table_number
+    return result.table_number
 
 
 def create_guest_router() -> Router:
@@ -215,7 +164,7 @@ def create_guest_router() -> Router:
     ):
         """Show categories menu (reply button 'Меню')."""
         table_number = await _require_active_table(
-            state, table_service, message.answer
+            state, kwargs["guest_session_service"], message.answer
         )
         if table_number is None:
             return
@@ -238,7 +187,7 @@ def create_guest_router() -> Router:
     ):
         """Show cart contents (reply button 'Корзина')."""
         table_number = await _require_active_table(
-            state, table_service, message.answer
+            state, kwargs["guest_session_service"], message.answer
         )
         if table_number is None:
             return
@@ -269,7 +218,7 @@ def create_guest_router() -> Router:
     ):
         """Process checkout from the reply button."""
         table_number = await _require_active_table(
-            state, table_service, message.answer
+            state, kwargs["guest_session_service"], message.answer
         )
         if table_number is None:
             return
@@ -308,7 +257,7 @@ def create_guest_router() -> Router:
         # for_payment=True: a fresh table is auto-assigned a waiter here, but
         # a table closed under an existing session is rejected (rescan).
         table_number = await _require_active_table(
-            state, table_service, message.answer, for_payment=True
+            state, kwargs["guest_session_service"], message.answer, for_payment=True
         )
         if table_number is None:
             return
@@ -363,7 +312,7 @@ def create_guest_router() -> Router:
         quantity = int(parts[4])
 
         table_number = await _require_active_table(
-            state, table_service, lambda t: callback.answer(t, show_alert=True)
+            state, kwargs["guest_session_service"], lambda t: callback.answer(t, show_alert=True)
         )
         if table_number is None:
             return
@@ -384,7 +333,7 @@ def create_guest_router() -> Router:
     ):
         """Show cart contents (inline 'Корзина' button)."""
         table_number = await _require_active_table(
-            state, table_service, lambda t: callback.answer(t, show_alert=True)
+            state, kwargs["guest_session_service"], lambda t: callback.answer(t, show_alert=True)
         )
         if table_number is None:
             return
@@ -418,7 +367,7 @@ def create_guest_router() -> Router:
         dish_id = int(callback.data.split("_")[3])
 
         table_number = await _require_active_table(
-            state, table_service, lambda t: callback.answer(t, show_alert=True)
+            state, kwargs["guest_session_service"], lambda t: callback.answer(t, show_alert=True)
         )
         if table_number is None:
             return
@@ -456,7 +405,7 @@ def create_guest_router() -> Router:
     ):
         """Process checkout - create order and auto-assign a waiter."""
         table_number = await _require_active_table(
-            state, table_service, lambda t: callback.answer(t, show_alert=True)
+            state, kwargs["guest_session_service"], lambda t: callback.answer(t, show_alert=True)
         )
         if table_number is None:
             return
@@ -499,7 +448,7 @@ def create_guest_router() -> Router:
         # closed under an existing session is rejected (rescan required).
         table_number = await _require_active_table(
             state,
-            table_service,
+            kwargs["guest_session_service"],
             lambda t: callback.answer(t, show_alert=True),
             for_payment=True,
         )
@@ -542,7 +491,7 @@ def create_guest_router() -> Router:
         # closed under an existing session is rejected (rescan required).
         table_number = await _require_active_table(
             state,
-            table_service,
+            kwargs["guest_session_service"],
             lambda t: callback.answer(t, show_alert=True),
             for_payment=True,
         )
