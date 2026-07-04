@@ -15,6 +15,7 @@ class User:
     password: Optional[str]
     role: str
     chat_id: Optional[int]
+    must_change_password: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,128 +83,13 @@ class ClosedBill:
     closed_at: Optional[str]
 
 
-# SQL schema definitions
-SCHEMA_SQL = """
--- Users table (staff authentication)
-CREATE TABLE IF NOT EXISTS users (
-    id BIGSERIAL PRIMARY KEY,
-    username VARCHAR(50) UNIQUE NOT NULL,
-    password VARCHAR(255),
-    role VARCHAR(20) NOT NULL CHECK (role IN ('admin', 'waiter')),
-    chat_id BIGINT
-);
-
--- Menu categories
-CREATE TABLE IF NOT EXISTS categories (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL
-);
-
--- Menu items
-CREATE TABLE IF NOT EXISTS menu (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    description TEXT,
-    price NUMERIC(10, 2) NOT NULL CHECK (price >= 0),
-    image_url VARCHAR(255),
-    category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE
-);
-
--- Shopping carts (one per table)
-CREATE TABLE IF NOT EXISTS carts (
-    id SERIAL PRIMARY KEY,
-    table_number INTEGER NOT NULL UNIQUE,
-    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Cart items
-CREATE TABLE IF NOT EXISTS cart_items (
-    id SERIAL PRIMARY KEY,
-    cart_id INTEGER REFERENCES carts(id) ON DELETE CASCADE,
-    menu_item_id INTEGER REFERENCES menu(id) ON DELETE CASCADE,
-    quantity INTEGER NOT NULL CHECK (quantity > 0),
-    price NUMERIC(10, 2) NOT NULL CHECK (price >= 0)
-);
-
--- Orders
-CREATE TABLE IF NOT EXISTS orders (
-    id SERIAL PRIMARY KEY,
-    waiter_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
-    table_number INTEGER NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'pending',
-    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Waiter-table assignments
-CREATE TABLE IF NOT EXISTS waiter_assignments (
-    id SERIAL PRIMARY KEY,
-    waiter_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-    table_number INTEGER NOT NULL UNIQUE,
-    status VARCHAR(20) NOT NULL DEFAULT 'open',
-    payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid',
-    assigned_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Closed bills (historical revenue records kept after carts are cleared)
-CREATE TABLE IF NOT EXISTS closed_bills (
-    id SERIAL PRIMARY KEY,
-    waiter_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
-    table_number INTEGER NOT NULL,
-    amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
-    closed_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_menu_category_id ON menu(category_id);
-CREATE INDEX IF NOT EXISTS idx_cart_items_cart_id ON cart_items(cart_id);
-CREATE INDEX IF NOT EXISTS idx_cart_items_menu_item_id ON cart_items(menu_item_id);
-CREATE INDEX IF NOT EXISTS idx_orders_table_number ON orders(table_number);
-CREATE INDEX IF NOT EXISTS idx_waiter_assignments_table_number ON waiter_assignments(table_number);
-CREATE INDEX IF NOT EXISTS idx_waiter_assignments_status ON waiter_assignments(status);
-CREATE INDEX IF NOT EXISTS idx_closed_bills_waiter_id ON closed_bills(waiter_id);
-CREATE INDEX IF NOT EXISTS idx_closed_bills_closed_at ON closed_bills(closed_at);
-"""
-
-
-def _split_sql(sql: str) -> list[str]:
-    """Split a multi-statement SQL string into individual statements.
-    
-    asyncpg executes only one statement per call, so we split on ';'.
-    Comment-only fragments and empty fragments are skipped.
-    """
-    statements = []
-    for raw in sql.split(";"):
-        lines = [ln for ln in raw.splitlines() if not ln.strip().startswith("--")]
-        stmt = "\n".join(lines).strip()
-        if stmt:
-            statements.append(stmt)
-    return statements
-
-
-SCHEMA_STATEMENTS: list[str] = _split_sql(SCHEMA_SQL)
-
-
-# Column-level migrations: each tuple is (table, column, ALTER TABLE clause).
-# Applied idempotently in init_db / main after the base schema is created.
-COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
-    (
-        "waiter_assignments",
-        "payment_status",
-        "ALTER TABLE waiter_assignments "
-        "ADD COLUMN payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid'",
-    ),
-]
-
-# Type-level migrations: widen/alter existing columns idempotently.
-# ALTER TYPE is safe to run repeatedly (it's a no-op if the type already matches).
-TYPE_MIGRATIONS: list[tuple[str, str, str]] = [
-    # image_url holds full URLs (some Wikimedia thumbnail URLs exceed 255 chars)
-    (
-        "menu",
-        "image_url",
-        "ALTER TABLE menu ALTER COLUMN image_url TYPE TEXT",
-    ),
-]
+# NOTE: Schema DDL is now managed by Alembic.
+#   - Physical schema definitions live in ``database/db_schema.py`` (SQLAlchemy).
+#   - Migration scripts live in ``alembic/versions/``.
+#   - ``database/migrations.py::bootstrap_database`` applies them at startup.
+# The old hand-rolled ``SCHEMA_SQL`` / ``SCHEMA_STATEMENTS`` /
+# ``COLUMN_MIGRATIONS`` / ``TYPE_MIGRATIONS`` constants have been removed in
+# favour of versioned, rollback-able Alembic migrations.
 
 
 # Seed data: default categories (idempotent insert)
