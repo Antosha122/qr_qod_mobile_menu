@@ -15,33 +15,35 @@ class OrderRepository:
     def __init__(self, pool: asyncpg.Pool):
         self._pool = pool
 
-    async def create(self, waiter_id: Optional[int], table_number: int, status: str = "pending") -> Order:
+    async def create(self, waiter_id: Optional[int], table_number: int, status: str = "pending", conn=None) -> Order:
         """Create a new order.
-        
+
         Args:
             waiter_id: ID of the waiter handling the order (optional).
             table_number: The restaurant table number.
             status: Order status (default 'pending').
-            
+            conn: Optional existing connection (for transactions).
+
         Returns:
             The created Order instance.
         """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO orders (waiter_id, table_number, status)
-                VALUES ($1, $2, $3)
-                RETURNING id, waiter_id, table_number, status, created_at
-                """,
-                waiter_id, table_number, status,
-            )
-            return Order(
-                id=row["id"],
-                waiter_id=row["waiter_id"],
-                table_number=row["table_number"],
-                status=row["status"],
-                created_at=row["created_at"].isoformat() if row["created_at"] else None,
-            )
+        sql = """
+            INSERT INTO orders (waiter_id, table_number, status)
+            VALUES ($1, $2, $3)
+            RETURNING id, waiter_id, table_number, status, created_at
+        """
+        if conn is not None:
+            row = await conn.fetchrow(sql, waiter_id, table_number, status)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(sql, waiter_id, table_number, status)
+        return Order(
+            id=row["id"],
+            waiter_id=row["waiter_id"],
+            table_number=row["table_number"],
+            status=row["status"],
+            created_at=row["created_at"].isoformat() if row["created_at"] else None,
+        )
 
     async def get_by_id(self, order_id: int) -> Optional[Order]:
         """Get an order by ID.
