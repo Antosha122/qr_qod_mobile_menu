@@ -1,10 +1,36 @@
 """Common fixtures and mocks for tests."""
 import asyncio
+import contextlib
 from datetime import datetime
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+def _make_mock_pool():
+    """Create a mock asyncpg pool that supports async context manager.
+
+    The mock pool's ``acquire()`` returns an async context manager that yields
+    a mock connection. The connection's ``transaction()`` is also an async
+    context manager. This allows services to use ``async with pool.acquire()``
+    and ``async with conn.transaction():`` transparently in tests.
+    """
+    conn = AsyncMock()
+
+    @contextlib.asynccontextmanager
+    async def _transaction():
+        yield
+
+    conn.transaction = _transaction
+
+    @contextlib.asynccontextmanager
+    async def _acquire():
+        yield conn
+
+    pool = MagicMock()
+    pool.acquire = _acquire
+    return pool
 
 from database.models import (
     User,
@@ -162,6 +188,7 @@ def mock_order_repo():
 def mock_assignment_repo():
     """Create a mock WaiterAssignmentRepository."""
     repo = AsyncMock()
+    repo._pool = _make_mock_pool()
     repo.assign_waiter = AsyncMock()
     repo.get_by_table = AsyncMock(return_value=None)
     repo.get_open_assignment = AsyncMock(return_value=None)
