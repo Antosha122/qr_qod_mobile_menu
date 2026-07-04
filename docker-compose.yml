@@ -3,6 +3,7 @@
 # =============================================================================
 # Services:
 #   - db    : PostgreSQL 16 with health check + persistent volume
+#   - redis : Redis 7 for sessions (TTL + revocation) and FSM storage
 #   - bot   : Telegram bot (guest + staff) built from the Dockerfile
 #
 # Usage:
@@ -10,8 +11,9 @@
 #   2. docker compose up -d --build
 #   3. docker compose logs -f bot
 #
-# The bot waits for the database to be healthy (depends_on: condition: service_healthy)
-# then runs init_db.py (idempotent) and starts polling.
+# The bot waits for the database (and Redis, if enabled) to be healthy
+# (depends_on: condition: service_healthy) then runs init_db.py (idempotent)
+# and starts polling.
 # =============================================================================
 
 services:
@@ -56,6 +58,44 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------------
+  # Redis — sessions (TTL + revocation) + FSM storage
+  # ---------------------------------------------------------------------------
+  # Optional but strongly recommended for production / multi-instance.
+  # If REDIS_URL is not set in the bot's environment, the bot falls back to
+  # in-memory storage (single-instance only).
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: tokio_bar_redis
+    restart: unless-stopped
+    # Disable persistence: sessions/FSM are purely runtime state and do not
+    # need to survive a Redis restart (users simply re-login). Use
+    # `--appendonly yes` if you want session persistence across Redis reboots.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+        reservations:
+          memory: 64M
+    networks:
+      - tokio_net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
   # Bot application (guest + staff bots in one container)
   # ---------------------------------------------------------------------------
   bot:
@@ -69,6 +109,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       # ---- Bot tokens (REQUIRED) --------------------------------------------
       GUEST_BOT_TOKEN: ${GUEST_BOT_TOKEN:?GUEST_BOT_TOKEN is required in .env}
@@ -80,6 +122,14 @@ services:
       DB_NAME: ${DB_NAME:-tokio_bar}
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required in .env}
+
+      # ---- Redis → sessions + FSM storage ----------------------------------
+      # Points to the `redis` service. Leave empty to use in-memory mode
+      # (single-instance development only).
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_SESSION_TTL: ${REDIS_SESSION_TTL:-86400}
+      REDIS_FSM_STATE_TTL: ${REDIS_FSM_STATE_TTL:-86400}
+      REDIS_FSM_DATA_TTL: ${REDIS_FSM_DATA_TTL:-86400}
 
       # ---- Connection pool tuning (high-load resilience) -------------------
       # Increase these if you experience "too many connections" or timeouts.
@@ -139,6 +189,8 @@ services:
 # =============================================================================
 volumes:
   postgres_data:
+    driver: local
+  redis_data:
     driver: local
   bot_logs:
     driver: local
