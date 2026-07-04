@@ -1,4 +1,4 @@
-"""Main application entry point.
+﻿"""Main application entry point.
 
 Starts both the guest bot and the staff bot concurrently using asyncio.
 Supports proxy configuration for regions where Telegram API is blocked/unstable.
@@ -16,14 +16,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config.settings import settings
 from database.connection import get_db_pool, close_db_pool, check_db_connection
-from database.models import (
-    SCHEMA_STATEMENTS,
-    COLUMN_MIGRATIONS,
-    TYPE_MIGRATIONS,
-    SEED_CATEGORIES,
-    SEED_MENU_ITEMS,
-    SEED_MENU_IMAGES,
+from database.redis_connection import (
+    get_redis,
+    close_redis,
+    check_redis_connection,
 )
+from database.migrations import bootstrap_database
 from database.repositories import (
     UserRepository,
     MenuRepository,
@@ -34,9 +32,11 @@ from database.repositories import (
 )
 from middlewares.service_middleware import ServiceMiddleware
 from middlewares.auth_middleware import StaffAuthMiddleware
+from middlewares.throttling_middleware import ThrottlingMiddleware
 from services import (
     AuthService,
     CartService,
+    GuestSessionService,
     MenuService,
     OrderService,
     TableService,
@@ -59,9 +59,9 @@ def _create_bot(token: str) -> Bot:
     proxy_url = settings.proxy_url.strip() if settings.proxy_url else ""
     
     if proxy_url:
-        from aiogram.client.session.aiohttp import AiohttpSession
-        session = AiohttpSession(proxy=proxy_url)
-        logger.info(f"Using proxy: {proxy_url}")
+        from utils.proxy_session import ProxyAwareAiohttpSession
+        session = ProxyAwareAiohttpSession(proxy=proxy_url)
+        logger.info(f"Using ProxyAwareAiohttpSession with proxy: {proxy_url}")
         return Bot(
             token=token,
             session=session,
@@ -74,72 +74,34 @@ def _create_bot(token: str) -> Bot:
     )
 
 
-async def init_database() -> None:
-    """Initialize database: create pool, schema, seed data, and default admin.
+async def _create_fsm_storage():
+    """Create the FSM storage backend.
     
-    This function is idempotent — safe to run multiple times.
-    Creates all tables if they don't exist and seeds default menu data.
+    Uses aiogram's ``RedisStorage`` when Redis is available so FSM state/data
+    survives restarts and is shared across instances. Falls back to
+    ``MemoryStorage`` otherwise (development / single-instance mode).
     """
-    pool = await get_db_pool()
-    
-    # Create schema — asyncpg requires one statement per execute() call
-    async with pool.acquire() as conn:
-        for statement in SCHEMA_STATEMENTS:
-            await conn.execute(statement)
-    logger.info(f"Database schema initialized ({len(SCHEMA_STATEMENTS)} statements).")
-    
-    # Apply column-level migrations for existing databases (idempotent).
-    async with pool.acquire() as conn:
-        for table, column, alter_sql in COLUMN_MIGRATIONS:
-            exists = await conn.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = $1 AND column_name = $2)",
-                table, column,
-            )
-            if not exists:
-                await conn.execute(alter_sql)
-                logger.info(f"Added column '{column}' to table '{table}'.")
-    logger.info(f"Column migrations checked ({len(COLUMN_MIGRATIONS)} entries).")
-    
-    # Apply type-level migrations (idempotent: ALTER TYPE is a no-op if matched).
-    async with pool.acquire() as conn:
-        for table, column, alter_sql in TYPE_MIGRATIONS:
-            await conn.execute(alter_sql)
-    logger.info(f"Type migrations applied ({len(TYPE_MIGRATIONS)} entries).")
-    
-    # Seed categories (idempotent — ON CONFLICT DO NOTHING)
-    async with pool.acquire() as conn:
-        for cat_id, name in SEED_CATEGORIES:
-            await conn.execute(
-                "INSERT INTO categories (id, name) VALUES ($1, $2) "
-                "ON CONFLICT (id) DO NOTHING",
-                cat_id, name,
-            )
-    logger.info(f"Categories seeded ({len(SEED_CATEGORIES)} entries).")
-    
-    # Seed menu items (idempotent)
-    async with pool.acquire() as conn:
-        for item in SEED_MENU_ITEMS:
-            await conn.execute(
-                "INSERT INTO menu (id, name, description, price, category_id) "
-                "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING",
-                *item,
-            )
-    logger.info(f"Menu items seeded ({len(SEED_MENU_ITEMS)} entries).")
-    
-    # Seed menu item photos (UPDATE existing rows with image_url).
-    async with pool.acquire() as conn:
-        for item_id, image_url in SEED_MENU_IMAGES.items():
-            await conn.execute(
-                "UPDATE menu SET image_url = $1 WHERE id = $2",
-                image_url, item_id,
-            )
-    logger.info(f"Menu photos seeded ({len(SEED_MENU_IMAGES)} entries).")
-    
-    # Ensure default admin exists
-    user_repo = UserRepository(pool)
-    await user_repo.ensure_admin_exists("admin", "password123")
-    logger.info("Default admin account verified.")
+    redis = await get_redis()
+    if redis is None:
+        logger.info("FSM: using MemoryStorage (no Redis).")
+        return MemoryStorage()
+    try:
+        from aiogram.fsm.storage.redis import RedisStorage, DefaultKeyBuilder
+
+        storage = RedisStorage(
+            redis=redis,
+            key_builder=DefaultKeyBuilder(with_bot_id=True),
+            state_ttl=settings.redis_fsm_state_ttl,
+            data_ttl=settings.redis_fsm_data_ttl,
+        )
+        logger.info("FSM: using RedisStorage (distributed mode).")
+        return storage
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to initialise RedisStorage (%s). Falling back to "
+            "MemoryStorage.", exc,
+        )
+        return MemoryStorage()
 
 
 def create_services(pool) -> dict:
@@ -158,29 +120,34 @@ def create_services(pool) -> dict:
     assignment_repo = WaiterAssignmentRepository(pool)
     closed_bill_repo = ClosedBillRepository(pool)
     
+    table_service = TableService(
+        assignment_repo, cart_repo, user_repo, closed_bill_repo
+    )
     return {
         "auth_service": AuthService(user_repo),
         "menu_service": MenuService(menu_repo),
         "cart_service": CartService(cart_repo, menu_repo),
         "order_service": OrderService(order_repo, cart_repo),
-        "table_service": TableService(
-            assignment_repo, cart_repo, user_repo, closed_bill_repo
-        ),
+        "table_service": table_service,
+        "guest_session_service": GuestSessionService(table_service),
     }
 
 
-def setup_guest_bot(services: dict) -> tuple[Bot, Dispatcher]:
+def setup_guest_bot(services: dict, fsm_storage) -> tuple[Bot, Dispatcher]:
     """Configure the guest bot.
     
     Args:
         services: Dictionary of service instances.
+        fsm_storage: FSM storage backend (Redis or Memory).
         
     Returns:
         Tuple of (Bot, Dispatcher) for the guest bot.
     """
     bot = _create_bot(settings.guest_bot_token)
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=fsm_storage)
     
+    dp.message.middleware(ThrottlingMiddleware())
+    dp.callback_query.middleware(ThrottlingMiddleware())
     dp.message.middleware(ServiceMiddleware(**services))
     dp.callback_query.middleware(ServiceMiddleware(**services))
     dp.include_router(create_guest_router())
@@ -188,18 +155,21 @@ def setup_guest_bot(services: dict) -> tuple[Bot, Dispatcher]:
     return bot, dp
 
 
-def setup_staff_bot(services: dict) -> tuple[Bot, Dispatcher]:
+def setup_staff_bot(services: dict, fsm_storage) -> tuple[Bot, Dispatcher]:
     """Configure the staff bot.
     
     Args:
         services: Dictionary of service instances.
+        fsm_storage: FSM storage backend (Redis or Memory).
         
     Returns:
         Tuple of (Bot, Dispatcher) for the staff bot.
     """
     bot = _create_bot(settings.staff_bot_token)
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=fsm_storage)
     
+    dp.message.middleware(ThrottlingMiddleware())
+    dp.callback_query.middleware(ThrottlingMiddleware())
     dp.message.middleware(ServiceMiddleware(**services))
     dp.message.middleware(StaffAuthMiddleware())
     dp.callback_query.middleware(ServiceMiddleware(**services))
@@ -240,16 +210,27 @@ async def main() -> None:
         logger.error("Cannot connect to database. Exiting.")
         return
     
-    # Initialize database (create tables + seed data)
-    await init_database()
+    # Initialize database (Alembic migrations + seed data).
+    # Implementation lives in database/migrations.py (shared with init_db.py).
+    await bootstrap_database()
     
     # Create services
     pool = await get_db_pool()
     services = create_services(pool)
-    
+
+    # Initialize Redis (sessions + FSM). Soft-fail to in-memory mode.
+    redis_ok = await check_redis_connection()
+    if redis_ok:
+        logger.info("Redis is available — sessions and FSM use Redis.")
+    else:
+        logger.info("Redis is NOT available — using in-memory sessions/FSM.")
+
+    # Resolve the shared FSM storage once (used by both dispatchers).
+    fsm_storage = await _create_fsm_storage()
+
     # Setup bots
-    guest_bot, guest_dp = setup_guest_bot(services)
-    staff_bot, staff_dp = setup_staff_bot(services)
+    guest_bot, guest_dp = setup_guest_bot(services, fsm_storage)
+    staff_bot, staff_dp = setup_staff_bot(services, fsm_storage)
     
     logger.info("Both bots configured. Starting polling...")
     
@@ -272,11 +253,30 @@ async def main() -> None:
             signal.signal(sig, _sig_handler)
 
     async def _run_bots() -> None:
-        """Run both bots concurrently."""
+        """Run both bots.
+        
+        The initial ``delete_webhook`` calls are issued sequentially to avoid
+        concurrent TLS handshakes through the proxy, which can cause
+        ``ConnectionResetError`` on some HTTP proxies. After both webhooks are
+        cleared, polling runs concurrently.
+        """
+        # 1. Sequential startup (avoids proxy connection storms)
+        await run_bot_startup(guest_bot, guest_dp, "Guest")
+        await run_bot_startup(staff_bot, staff_dp, "Staff")
+
+        # 2. Concurrent polling
         await asyncio.gather(
-            run_bot(guest_bot, guest_dp, "Guest"),
-            run_bot(staff_bot, staff_dp, "Staff"),
+            guest_dp.start_polling(guest_bot, allowed_updates=guest_dp.resolve_used_update_types()),
+            staff_dp.start_polling(staff_bot, allowed_updates=staff_dp.resolve_used_update_types()),
         )
+
+    async def run_bot_startup(bot: Bot, dp: Dispatcher, name: str) -> None:
+        """Issue the initial delete_webhook for a bot."""
+        try:
+            logger.info(f"Starting {name} bot (clearing webhook)...")
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"{name} bot startup error: {e}", exc_info=True)
 
     try:
         bot_task = asyncio.create_task(_run_bots())
@@ -307,7 +307,9 @@ async def main() -> None:
                 pass
     finally:
         await close_db_pool()
-        logger.info("Database pool closed. Goodbye!")
+        logger.info("Database pool closed.")
+        await close_redis()
+        logger.info("Goodbye!")
 
 
 if __name__ == "__main__":
