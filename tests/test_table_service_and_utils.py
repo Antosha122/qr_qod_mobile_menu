@@ -69,8 +69,11 @@ class TestTableService:
         assert result is True
         # Already paid — no need to update the payment status again.
         mock_assignment_repo.update_payment_status.assert_not_called()
-        mock_cart_repo.clear_cart.assert_called_once_with(5)
-        mock_cart_repo.delete_cart.assert_called_once_with(5)
+        # conn= is passed because close_table runs inside a transaction.
+        mock_cart_repo.clear_cart.assert_called_once()
+        assert mock_cart_repo.clear_cart.call_args[0][0] == 5
+        mock_cart_repo.delete_cart.assert_called_once()
+        assert mock_cart_repo.delete_cart.call_args[0][0] == 5
 
     async def test_close_table_auto_marks_paid(
         self, mock_assignment_repo, mock_cart_repo, sample_assignment
@@ -90,10 +93,14 @@ class TestTableService:
 
         assert result is True
         # Payment is auto-confirmed before the table is closed.
-        mock_assignment_repo.update_payment_status.assert_called_once_with(5, "paid")
-        mock_assignment_repo.close_table.assert_called_once_with(5)
-        mock_cart_repo.clear_cart.assert_called_once_with(5)
-        mock_cart_repo.delete_cart.assert_called_once_with(5)
+        mock_assignment_repo.update_payment_status.assert_called_once()
+        assert mock_assignment_repo.update_payment_status.call_args[0][:2] == (5, "paid")
+        mock_assignment_repo.close_table.assert_called_once()
+        assert mock_assignment_repo.close_table.call_args[0][0] == 5
+        mock_cart_repo.clear_cart.assert_called_once()
+        assert mock_cart_repo.clear_cart.call_args[0][0] == 5
+        mock_cart_repo.delete_cart.assert_called_once()
+        assert mock_cart_repo.delete_cart.call_args[0][0] == 5
 
     async def test_close_table_not_found(self, mock_assignment_repo, mock_cart_repo):
         """Test closing a non-existent table."""
@@ -132,9 +139,12 @@ class TestTableService:
 
         assert closed is True
         # The repo's close_table now also resets payment_status to 'unpaid'.
-        mock_assignment_repo.close_table.assert_called_once_with(5)
-        mock_cart_repo.clear_cart.assert_called_once_with(5)
-        mock_cart_repo.delete_cart.assert_called_once_with(5)
+        mock_assignment_repo.close_table.assert_called_once()
+        assert mock_assignment_repo.close_table.call_args[0][0] == 5
+        mock_cart_repo.clear_cart.assert_called_once()
+        assert mock_cart_repo.clear_cart.call_args[0][0] == 5
+        mock_cart_repo.delete_cart.assert_called_once()
+        assert mock_cart_repo.delete_cart.call_args[0][0] == 5
 
         # Reopening the table (new guests) yields a fresh unpaid assignment.
         fresh_assignment = WaiterAssignment(
