@@ -21,13 +21,28 @@ class Settings(BaseSettings):
     db_pool_min_size: int = 2
     db_pool_max_size: int = 10
     db_command_timeout: int = 60
-    
+
+    # Redis Configuration (sessions + FSM storage).
+    # When empty/unset, the bot falls back to in-memory storage (single
+    # instance, development only). In production — always set REDIS_URL.
+    redis_url: str = ""
+    redis_session_ttl: int = 86_400  # 24 hours, sliding expiration
+    redis_fsm_state_ttl: int = 86_400  # FSM state TTL
+    redis_fsm_data_ttl: int = 86_400  # FSM data TTL
+
     # Application Settings
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     timezone: str = "Europe/Moscow"
     
     # Restaurant Settings
     total_tables: int = 7
+    
+    # Admin bootstrap credentials.
+    # Used only to create the default admin on first run (idempotent).
+    # If ADMIN_PASSWORD is empty, a random one-time password is generated and
+    # logged once; the admin is then forced to change it on first login.
+    admin_username: str = "admin"
+    admin_password: str = ""
     
     # Network (optional proxy for regions where Telegram API is blocked)
     proxy_url: str = ""
