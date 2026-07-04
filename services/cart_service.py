@@ -2,7 +2,7 @@
 import logging
 from typing import Optional
 
-from database.repositories import CartRepository, MenuRepository
+from database.repositories import CartRepositoryProtocol, MenuRepositoryProtocol
 from database.models import Cart, MenuItem
 
 logger = logging.getLogger(__name__)
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class CartService:
     """Handles cart-related business logic."""
 
-    def __init__(self, cart_repo: CartRepository, menu_repo: MenuRepository):
+    def __init__(self, cart_repo: CartRepositoryProtocol, menu_repo: MenuRepositoryProtocol):
         self._cart_repo = cart_repo
         self._menu_repo = menu_repo
 
