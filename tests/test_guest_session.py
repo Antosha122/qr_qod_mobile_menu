@@ -9,6 +9,7 @@ import pytest
 
 from database.models import WaiterAssignment
 from handlers.guest_handlers import _require_active_table, _invalidate_session
+from services.guest_session_service import GuestSessionService
 
 
 class _FakeState:
@@ -49,22 +50,28 @@ def reopened_assignment():
     )
 
 
-def _table_service(open_assignment=None, new_assignment=None):
-    """Build a mock TableService with configurable get_open/auto_assign results."""
+def _build_services(open_assignment=None, new_assignment=None):
+    """Build a real GuestSessionService wrapping a mock TableService.
+
+    Returns a tuple (table_service_mock, guest_session_service) so tests can
+    both pass the GuestSessionService to ``_require_active_table`` and assert
+    on the underlying TableService mock's calls.
+    """
     ts = AsyncMock()
     ts.get_open_assignment = AsyncMock(return_value=open_assignment)
     ts.auto_assign_waiter = AsyncMock(return_value=new_assignment)
-    return ts
+    gss = GuestSessionService(ts)
+    return ts, gss
 
 
 class TestNoTableNumber:
     async def test_no_table_number_asks_to_scan(self):
         """A guest with no table_number at all is asked to scan the QR code."""
         state = _FakeState({})  # no table_number, no token
-        ts = _table_service()
+        ts, gss = _build_services()
         respond = AsyncMock()
 
-        result = await _require_active_table(state, ts, respond)
+        result = await _require_active_table(state, gss, respond)
 
         assert result is None
         respond.assert_awaited_once()
@@ -78,10 +85,10 @@ class TestFreshSession:
     async def test_fresh_open_table_latches_token(self, open_assignment):
         """A fresh guest at an already-open table latches onto its token."""
         state = _FakeState({"table_number": 5, "session_assigned_at": None})
-        ts = _table_service(open_assignment=open_assignment)
+        ts, gss = _build_services(open_assignment=open_assignment)
         respond = AsyncMock()
 
-        result = await _require_active_table(state, ts, respond)
+        result = await _require_active_table(state, gss, respond)
 
         assert result == 5
         # Token captured for future close/reopen detection.
@@ -93,10 +100,10 @@ class TestFreshSession:
         No token is captured; the table will be opened on checkout/payment.
         """
         state = _FakeState({"table_number": 5, "session_assigned_at": None})
-        ts = _table_service(open_assignment=None)
+        ts, gss = _build_services(open_assignment=None)
         respond = AsyncMock()
 
-        result = await _require_active_table(state, ts, respond, for_payment=False)
+        result = await _require_active_table(state, gss, respond, for_payment=False)
 
         assert result == 5
         assert state._data["session_assigned_at"] is None
@@ -107,11 +114,13 @@ class TestFreshSession:
     ):
         """A fresh guest paying at a closed table gets a waiter auto-assigned."""
         state = _FakeState({"table_number": 5, "session_assigned_at": None})
-        ts = _table_service(open_assignment=None, new_assignment=open_assignment)
+        ts, gss = _build_services(
+            open_assignment=None, new_assignment=open_assignment
+        )
         respond = AsyncMock()
 
         result = await _require_active_table(
-            state, ts, respond, for_payment=True
+            state, gss, respond, for_payment=True
         )
 
         assert result == 5
@@ -121,11 +130,11 @@ class TestFreshSession:
     async def test_fresh_payment_no_waiters_fails(self):
         """If no waiters are available, payment cannot proceed."""
         state = _FakeState({"table_number": 5, "session_assigned_at": None})
-        ts = _table_service(open_assignment=None, new_assignment=None)
+        ts, gss = _build_services(open_assignment=None, new_assignment=None)
         respond = AsyncMock()
 
         result = await _require_active_table(
-            state, ts, respond, for_payment=True
+            state, gss, respond, for_payment=True
         )
 
         assert result is None
@@ -147,10 +156,10 @@ class TestActiveSessionClosedByStaff:
             }
         )
         # Table is now closed: get_open_assignment returns None.
-        ts = _table_service(open_assignment=None)
+        ts, gss = _build_services(open_assignment=None)
         respond = AsyncMock()
 
-        result = await _require_active_table(state, ts, respond)
+        result = await _require_active_table(state, gss, respond)
 
         assert result is None
         # Session is cleared so the guest must rescan.
@@ -175,10 +184,10 @@ class TestActiveSessionClosedByStaff:
                 "session_assigned_at": open_assignment.assigned_at,
             }
         )
-        ts = _table_service(open_assignment=reopened_assignment)
+        ts, gss = _build_services(open_assignment=reopened_assignment)
         respond = AsyncMock()
 
-        result = await _require_active_table(state, ts, respond)
+        result = await _require_active_table(state, gss, respond)
 
         assert result is None
         assert state._data["table_number"] is None
@@ -195,13 +204,13 @@ class TestActiveSessionClosedByStaff:
                 "session_assigned_at": open_assignment.assigned_at,
             }
         )
-        ts = _table_service(
+        ts, gss = _build_services(
             open_assignment=None, new_assignment=open_assignment
         )
         respond = AsyncMock()
 
         result = await _require_active_table(
-            state, ts, respond, for_payment=True
+            state, gss, respond, for_payment=True
         )
 
         assert result is None
@@ -219,10 +228,10 @@ class TestActiveSessionStillValid:
                 "session_assigned_at": open_assignment.assigned_at,
             }
         )
-        ts = _table_service(open_assignment=open_assignment)
+        ts, gss = _build_services(open_assignment=open_assignment)
         respond = AsyncMock()
 
-        result = await _require_active_table(state, ts, respond)
+        result = await _require_active_table(state, gss, respond)
 
         assert result == 5
         respond.assert_not_awaited()
