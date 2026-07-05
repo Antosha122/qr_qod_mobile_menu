@@ -386,4 +386,3 @@ python -m pytest tests/ --cov=. --cov-report=html
 │   └── test_keyboards_and_qr.py
 │
 └── states.py                  # FSM-состояния
-```
