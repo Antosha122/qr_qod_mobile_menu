@@ -462,9 +462,17 @@ class TableService:
 
             # Cart total — only fetch for tables the user actually "owns" so we
             # don't issue a DB query per foreign table.
+            #
+            # NOTE: get_cart_total() expects a cart_id, NOT a table_number.
+            # We must first resolve the table's cart and then sum its items.
+            # (Previously the table_number was passed as cart_id, which made
+            # every table show "0 ₽" because cart ids rarely equal table
+            # numbers.)
             total = 0.0
             if is_mine:
-                total = await self._cart_repo.get_cart_total(table_number)
+                cart = await self._cart_repo.get_cart_by_table(table_number)
+                if cart is not None:
+                    total = await self._cart_repo.get_cart_total(cart.id)
 
             overview[table_number] = {
                 "is_open": is_open,
