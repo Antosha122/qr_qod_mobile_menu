@@ -187,8 +187,19 @@ def mock_order_repo():
 @pytest.fixture
 def mock_assignment_repo():
     """Create a mock WaiterAssignmentRepository."""
+    pool = _make_mock_pool()
     repo = AsyncMock()
-    repo._pool = _make_mock_pool()
+    repo._pool = pool
+
+    # acquire_connection() must return an async context manager (not a
+    # coroutine). The real implementation uses @contextlib.asynccontextmanager,
+    # so we replicate that behaviour here by delegating to the mock pool.
+    @contextlib.asynccontextmanager
+    async def _acquire_connection():
+        async with pool.acquire() as conn:
+            yield conn
+
+    repo.acquire_connection = _acquire_connection
     repo.assign_waiter = AsyncMock()
     repo.get_by_table = AsyncMock(return_value=None)
     repo.get_open_assignment = AsyncMock(return_value=None)
