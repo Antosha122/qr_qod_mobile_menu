@@ -2,7 +2,7 @@
 import pytest
 from unittest.mock import AsyncMock
 
-from database.models import User, WaiterAssignment
+from database.models import Cart, User, WaiterAssignment
 from services.table_service import (
     TableService,
     PaymentConfirmationError,
@@ -410,6 +410,102 @@ class TestAutoAssignWaiter:
 
         assert result == sample_assignment
         mock_assignment_repo.assign_waiter.assert_called_once_with(w2.id, 3)
+
+
+class TestGetTableOverview:
+    """Tests for TableService.get_table_overview().
+
+    Most importantly, these guard against the regression where the table's
+    cart total was always shown as ``0 ₽`` to waiters. The root cause was that
+    ``get_cart_total(table_number)`` was called with a table number while the
+    repository method expects a ``cart_id``. The overview must first resolve
+    the cart for the table and then sum its items by ``cart.id``.
+    """
+
+    async def test_overview_uses_cart_id_not_table_number(
+        self, mock_assignment_repo, mock_cart_repo, sample_assignment
+    ):
+        """The cart total must be computed from the resolved cart, not the
+        table number.
+
+        We deliberately give the cart an id (77) that differs from the table
+        number (5). If the service incorrectly passed the table number to
+        ``get_cart_total`` it would hit the ``return_value=0.0`` branch we set
+        up for ``get_cart_total(5)`` and the table would wrongly show ``0 ₽``.
+        """
+        mock_assignment_repo.get_open_by_waiter.return_value = [sample_assignment]
+        cart = Cart(id=77, table_number=5, created_at="2024-01-01T12:00:00")
+        mock_cart_repo.get_cart_by_table.return_value = cart
+
+        async def _fake_get_cart_total(cart_id, conn=None):
+            # Only the call with the real cart id returns a non-zero sum.
+            return 1230.0 if cart_id == 77 else 0.0
+
+        mock_cart_repo.get_cart_total.side_effect = _fake_get_cart_total
+
+        service = TableService(mock_assignment_repo, mock_cart_repo)
+        overview = await service.get_table_overview(waiter_id=2)
+
+        assert 5 in overview
+        info = overview[5]
+        assert info["is_open"] is True
+        assert info["is_mine"] is True
+        assert info["total"] == 1230.0
+        # Sanity check: the repository was queried with the cart id, not 5.
+        mock_cart_repo.get_cart_by_table.assert_awaited_once_with(5)
+        mock_cart_repo.get_cart_total.assert_awaited_once_with(77)
+
+    async def test_overview_admin_sees_total_for_any_table(
+        self, mock_assignment_repo, mock_cart_repo, sample_assignment
+    ):
+        """Admins see the cart total for all open tables."""
+        mock_assignment_repo.get_all_open.return_value = [sample_assignment]
+        cart = Cart(id=77, table_number=5, created_at="2024-01-01T12:00:00")
+        mock_cart_repo.get_cart_by_table.return_value = cart
+        mock_cart_repo.get_cart_total.return_value = 500.0
+
+        service = TableService(mock_assignment_repo, mock_cart_repo)
+        overview = await service.get_table_overview(waiter_id=1, is_admin=True)
+
+        assert overview[5]["total"] == 500.0
+        assert overview[5]["is_mine"] is True
+
+    async def test_overview_no_cart_shows_zero(
+        self, mock_assignment_repo, mock_cart_repo, sample_assignment
+    ):
+        """A table with no cart (e.g. just assigned, nothing ordered yet)
+        should show a total of 0.0 without raising."""
+        mock_assignment_repo.get_open_by_waiter.return_value = [sample_assignment]
+        mock_cart_repo.get_cart_by_table.return_value = None
+
+        service = TableService(mock_assignment_repo, mock_cart_repo)
+        overview = await service.get_table_overview(waiter_id=2)
+
+        assert overview[5]["total"] == 0.0
+        mock_cart_repo.get_cart_total.assert_not_awaited()
+
+    async def test_overview_foreign_table_total_not_fetched(
+        self, mock_assignment_repo, mock_cart_repo
+    ):
+        """Tables owned by other waiters are shown as locked and their totals
+        are NOT fetched (no per-table DB queries for foreign tables)."""
+        other_assignment = WaiterAssignment(
+            id=9,
+            waiter_id=99,
+            table_number=5,
+            status="open",
+            assigned_at="2024-01-01T12:00:00",
+            payment_status="unpaid",
+        )
+        mock_assignment_repo.get_open_by_waiter.return_value = [other_assignment]
+
+        service = TableService(mock_assignment_repo, mock_cart_repo)
+        overview = await service.get_table_overview(waiter_id=2)
+
+        assert overview[5]["is_open"] is True
+        assert overview[5]["is_mine"] is False
+        assert overview[5]["total"] == 0.0
+        mock_cart_repo.get_cart_by_table.assert_not_awaited()
 
 
 class TestFormatters:
