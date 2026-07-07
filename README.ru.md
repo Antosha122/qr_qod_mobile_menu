@@ -1,0 +1,396 @@
+# Система управления рестораном
+
+> 🌐 **Языки / Languages:** [Русский](README.ru.md) | [English](README.md)
+
+Telegram-бот система для ресторана с двумя ботами: для гостей (заказ через QR-коды) и для персонала (официанты и администраторы).
+
+
+## ✨ Возможности
+
+### Бот для гостей (Guest Bot)
+- 📱 Сканирование QR-кода стола для начала заказа
+- 🍽️ Просмотр меню по категориям
+- 🛒 Добавление блюд в корзину с выбором количества
+- 🗑️ Управление корзиной (добавление/удаление блюд)
+- ✅ Оформление заказа
+
+### Бот для персонала (Staff Bot)
+- 🔑 Авторизация по логину и паролю
+- 👨‍🍳 Управление официантами (добавление новых аккаунтов — для админа)
+- 🍽️ Просмотр заказов по столам
+- 📋 Просмотр всех заказов
+- 🍣 Просмотр меню
+- 🚪 Управление сессиями (вход/выход)
+
+
+### Принципы проектирования
+- **Dependency Injection** — сервисы внедряются через middleware
+- **Repository Pattern** — изоляция доступа к БД
+- **Service Layer** — бизнес-логика отделена от UI
+- **Configuration Management** — все настройки в `.env`
+- **Type Safety** — полная типизация с mypy-совместимыми аннотациями
+
+## 🛠 Технологии
+
+| Компонент | Технология |
+|-----------|-----------|
+| Bot Framework | aiogram 3.4.1 |
+| Database | PostgreSQL + asyncpg |
+| Migrations | Alembic (versioned, rollback-able) |
+| Schema (DDL) | SQLAlchemy 2.0 (for Alembic autogenerate) |
+| Configuration | pydantic-settings |
+| QR Codes | qrcode |
+| Testing | pytest + pytest-asyncio |
+| Logging | Python logging (rotating files) |
+
+## 📦 Установка
+
+### Требования
+- Python 3.11+
+- PostgreSQL 15+
+
+### Шаги установки
+
+1. **Клонирование репозитория**
+   ```bash
+   git clone <repository-url>
+   cd "pythonProject(QR коды рестораны)"
+   ```
+
+2. **Создание виртуального окружения**
+   ```bash
+   python -m venv venv
+   # Windows
+   venv\Scripts\activate
+   # Linux/Mac
+   source venv/bin/activate
+   ```
+
+3. **Установка зависимостей**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Настройка базы данных**
+   ```bash
+   # Создайте базу данных PostgreSQL
+   createdb tokio_bar **или что то другое**
+   ```
+
+## ⚙️ Настройка
+
+1. **Скопируйте пример конфигурации**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Заполните `.env` файл**
+   ```env
+   # Bot Configuration
+   GUEST_BOT_TOKEN=your_guest_bot_token
+   STAFF_BOT_TOKEN=your_staff_bot_token
+
+   # Database Configuration
+   DB_HOST=localhost
+   DB_PORT=5432
+   DB_NAME=tokio_bar
+   DB_USER=postgres
+   DB_PASSWORD=your_password
+
+   # Application Settings
+   LOG_LEVEL=INFO
+   TIMEZONE=Europe/Moscow
+
+   # Restaurant Settings
+   TOTAL_TABLES=7
+
+   # Admin bootstrap credentials (used only on first run).
+   # If ADMIN_PASSWORD is empty, a random one-time password is generated
+   # and logged once; the admin must change it on first login.
+   ADMIN_USERNAME=admin
+   ADMIN_PASSWORD=
+   ```
+
+3. **Получите токены ботов**
+   - Напишите [@BotFather](https://t.me/BotFather) в Telegram
+   - Создайте двух ботов: гостевой и персональный
+   - Скопируйте токены в `.env`
+
+## 🚀 Запуск
+
+### Запуск системы
+```bash
+python main.py
+```
+
+Система автоматически:
+- Применит миграции схемы БД (Alembic, `alembic upgrade head`)
+- Создаст администратора по умолчанию (креды из `.env`; если `ADMIN_PASSWORD`
+  пуст — сгенерирует одноразовый пароль и выведет его в лог, после чего
+  потребует смены пароля при первом входе)
+- Захеширует устаревшие plain-text пароли в bcrypt (если есть)
+- Запустит оба бота параллельно
+
+### 🗄 Миграции схемы БД (Alembic)
+
+Схема базы данных управляется **Alembic** — все DDL-изменения живут в
+`alembic/versions/` и применяются версионно (с возможностью отката).
+
+Источник истины для схемы — SQLAlchemy-модели в `database/db_schema.py`.
+Логика инициализации (миграции + сиды + админ) вынесена в
+`database/migrations.py::bootstrap_database()` и используется как `main.py`,
+так и `init_db.py` (DRY).
+
+```bash
+# Применить все миграции (используется и при старте бота)
+python -m alembic upgrade head
+
+# Откатить последнюю миграцию
+python -m alembic downgrade -1
+
+# Посмотреть текущую версию схемы
+python -m alembic current
+
+# Сгенерировать новую миграцию по изменённым моделям database/db_schema.py
+python -m alembic revision --autogenerate -m "add new column"
+
+# Применить миграции + сиды + создать админа (то же, что делает entrypoint)
+python init_db.py
+```
+
+### Миграция паролей (одноразовая)
+
+При переходе с plain-text паролей на bcrypt запускать отдельный скрипт:
+
+```bash
+# Только проверить, какие пароли будут захешированы (без записи):
+python migrate_passwords.py --dry-run
+
+# Применить миграцию (идемпотентно — уже захешированные пароли пропускаются):
+python migrate_passwords.py
+```
+
+> Примечание: `main.py` и `init_db.py` также вызывают миграцию автоматически,
+> поэтому отдельный запуск нужен только для уже развёрнутых баз, где миграция
+> ещё не выполнялась.
+
+### Генерация QR-кодов
+```bash
+python -m utils.qr_generator --username Tokio_bar_bot --tables 7
+```
+
+QR-коды сохранятся в папку `qr_codes/`.
+
+## 🐳 Docker (продакшн-деплой)
+
+Проект полностью контейнеризован: PostgreSQL и бот запускаются одной командой.
+Образ спроектирован для продакшна и устойчив к высоким нагрузкам.
+
+
+### Быстрый старт
+
+1. **Создайте `.env`** на основе примера:
+   ```bash
+   cp .env.example .env
+   # Отредактируйте .env: вставьте токены ботов и пароль БД
+   ```
+
+2. **Соберите и запустите:**
+   ```bash
+   docker compose up -d --build
+   ```
+
+3. **Просмотр логов:**
+   ```bash
+   docker compose logs -f bot
+   ```
+
+4. **Остановка:**
+   ```bash
+   docker compose down
+   ```
+
+### Управление через Docker
+
+```bash
+# Пересобрать после изменения кода
+docker compose up -d --build
+
+# Проверить статус контейнеров
+docker compose ps
+
+# Проверить здоровье контейнеров
+docker inspect --format='{{.State.Health.Status}}' tokio_bar_bot
+docker inspect --format='{{.State.Health.Status}}' tokio_bar_db
+
+# Зайти в контейнер бота
+docker compose exec bot sh
+
+# Применить миграции БД вручную (миграции + сиды + админ)
+docker compose exec bot python init_db.py
+
+# Работа с Alembic напрямую внутри контейнера
+docker compose exec bot python -m alembic upgrade head
+docker compose exec bot python -m alembic current
+
+# Сгенерировать QR-коды внутри контейнера
+docker compose exec bot python -m utils.qr_generator --username Tokio_bar_bot --tables 7
+
+# Полный сброс (ВНИМАНИЕ: удаляет данные БД!)
+docker compose down -v
+```
+
+### Настройка под нагрузку
+
+Все параметры задаются в `.env` — перезапускать образ не нужно, только контейнер:
+
+```env
+# Пул соединений asyncpg
+DB_POOL_MIN_SIZE=2        # постоянные соединения
+DB_POOL_MAX_SIZE=15       # максимум параллельных запросов к БД
+DB_COMMAND_TIMEOUT=60     # таймаут SQL-запроса (сек)
+
+# Логирование
+LOG_LEVEL=INFO            # DEBUG | INFO | WARNING | ERROR
+```
+
+> ⚠️ `DB_POOL_MAX_SIZE` должен быть меньше `max_connections` в PostgreSQL
+> (по умолчанию 100). Для одного инстанса бота значение 10–20 оптимально.
+
+### Переменные окружения (полный список)
+
+| Переменная | Обязательная | По умолчанию | Описание |
+|------------|:---:|---|---|
+| `GUEST_BOT_TOKEN` | ✅ | — | Токен гостевого бота |
+| `STAFF_BOT_TOKEN` | ✅ | — | Токен бота персонала |
+| `DB_PASSWORD` | ✅ | — | Пароль PostgreSQL |
+| `DB_HOST` | — | `db` | Хост БД (имя сервиса в Compose) |
+| `DB_PORT` | — | `5432` | Порт БД |
+| `DB_NAME` | — | `tokio_bar` | Имя базы данных |
+| `DB_USER` | — | `postgres` | Пользователь БД |
+| `DB_POOL_MIN_SIZE` | — | `2` | Мин. размер пула соединений |
+| `DB_POOL_MAX_SIZE` | — | `15` | Макс. размер пула соединений |
+| `DB_COMMAND_TIMEOUT` | — | `60` | Таймаут запроса (сек) |
+| `LOG_LEVEL` | — | `INFO` | Уровень логирования |
+| `TIMEZONE` | — | `Europe/Moscow` | Часовой пояс |
+| `TOTAL_TABLES` | — | `7` | Количество столов |
+| `ADMIN_USERNAME` | — | `admin` | Логин администратора по умолчанию |
+| `ADMIN_PASSWORD` | — | — | Пароль администратора (если пуст — генерируется одноразовый) |
+| `PROXY_URL` | — | — | Прокси для Telegram API |
+| `SKIP_DB_INIT` | — | `0` | Пропустить `init_db.py` при старте |
+
+### Файлы Docker-инфраструктуры
+
+```
+├── Dockerfile              # Многоэтапная сборка образа
+├── .dockerignore           # Исключения из контекста сборки
+├── docker-compose.yml      # Оркестрация: db + bot
+└── docker/
+    ├── entrypoint.sh       # Ожидание БД → init_db → запуск
+    └── healthcheck.py      # Проверка живучести контейнера
+```
+
+## 🧪 Тестирование
+
+### Запуск всех тестов
+```bash
+python -m pytest tests/ -v
+```
+
+### Запуск с покрытием
+```bash
+python -m pytest tests/ --cov=. --cov-report=html
+```
+
+### Результаты
+- ✅ **105 тестов** покрывают все сервисы, клавиатуры, форматтеры и генератор QR
+- ✅ Тесты используют моки для изоляции от БД и Telegram API
+
+## 📁 Структура проекта
+
+```
+.
+├── main.py                    # Точка входа (боты)
+├── init_db.py                 # Инициализация БД (обёртка над bootstrap_database)
+├── alembic.ini                # Конфигурация Alembic (URL берётся из .env)
+├── migrate_passwords.py       # Миграция plain-text паролей в bcrypt
+├── requirements.txt           # Зависимости
+├── pytest.ini                 # Конфигурация тестов
+├── .env.example               # Пример конфигурации
+├── Dockerfile                 # Docker-образ (многоэтапная сборка)
+├── docker-compose.yml         # Оркестрация: PostgreSQL + бот
+├── .dockerignore              # Исключения из Docker-контекста
+│
+├── alembic/                   # Миграции схемы БД (Alembic)
+│   ├── env.py                 # Конфигурация окружения миграций (async + asyncpg)
+│   ├── script.py.mako         # Шаблон для новых миграций
+│   └── versions/              # Версионные миграции (upgrade/downgrade)
+│
+├── docker/                    # Docker-инфраструктура
+│   ├── entrypoint.sh          # Ожидание БД → миграции/сиды → запуск
+│   └── healthcheck.py         # Healthcheck контейнера
+│
+├── config/                    # Конфигурация
+│   ├── __init__.py
+│   └── settings.py            # Pydantic settings
+│
+├── database/                  # Слой данных
+│   ├── __init__.py
+│   ├── connection.py          # Пул соединений asyncpg
+│   ├── models.py              # Dataclass-модели (DTO) + сид-данные
+│   ├── db_schema.py           # SQLAlchemy-модели (источник схемы для Alembic)
+│   ├── migrations.py          # bootstrap_database() — единая инициализация
+│   └── repositories/          # Repository Pattern
+│       ├── __init__.py
+│       ├── user_repository.py
+│       ├── menu_repository.py
+│       ├── cart_repository.py
+│       ├── order_repository.py
+│       └── waiter_assignment_repository.py
+│
+├── services/                  # Бизнес-логика
+│   ├── __init__.py
+│   ├── auth_service.py        # Авторизация
+│   ├── menu_service.py        # Работа с меню
+│   ├── cart_service.py        # Корзина
+│   ├── order_service.py       # Заказы
+│   └── table_service.py       # Управление столами
+│
+├── handlers/                  # Обработчики ботов
+│   ├── __init__.py
+│   ├── guest_handlers.py      # Бот для гостей
+│   └── staff_handlers.py      # Бот для персонала
+│
+├── keyboards/                 # Клавиатуры Telegram
+│   ├── __init__.py
+│   ├── guest_keyboards.py     # Inline-клавиатуры
+│   └── staff_keyboards.py     # Reply-клавиатуры
+│
+├── middlewares/               # Middlewares
+│   ├── __init__.py
+│   ├── service_middleware.py  # Внедрение сервисов
+│   └── auth_middleware.py     # Управление сессиями
+│
+├── utils/                     # Утилиты
+│   ├── __init__.py
+│   ├── logger.py              # Настройка логирования
+│   ├── qr_generator.py        # Генерация QR-кодов
+│   ├── formatters.py          # Форматирование сообщений
+│   └── security.py            # Хеширование паролей (bcrypt)
+│
+├── tests/                     # Автотесты
+│   ├── __init__.py
+│   ├── conftest.py            # Фикстуры pytest
+│   ├── test_auth_service.py
+│   ├── test_cart_service.py
+│   ├── test_menu_order_service.py
+│   ├── test_table_service_and_utils.py
+│   └── test_keyboards_and_qr.py
+│
+└── states.py                  # FSM-состояния
+```
+
+## 📄 Лицензия
+
+Этот проект распространяется под лицензией **MIT**. Подробности — в файле
+[LICENSE](LICENSE).
