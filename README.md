@@ -1,5 +1,7 @@
 # Restaurant Management System
 
+https://burkinanton.ru/
+
 > 🌐 **Languages:** [English](README.md) | [Русский](README.ru.md)
 
 A Telegram bot system for restaurants featuring two bots: one for guests (ordering via QR codes) and one for staff (waiters and administrators).
