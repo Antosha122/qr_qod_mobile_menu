@@ -1,6 +1,6 @@
 # Restaurant Management System
 
-https://burkinanton.ru/
+МОЙ САЙТ ГДЕ МОЖНО БОЛЬШЕ УЗНАТЬ О МНЕ И МОИХ ПРОЕКТА - https://burkinanton.ru/
 
 > 🌐 **Languages:** [English](README.md) | [Русский](README.ru.md)
 
